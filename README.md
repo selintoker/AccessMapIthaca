@@ -1,16 +1,18 @@
-# React + Vite
+# AccessMap Ithaca
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+AccessMap Ithaca is a full-stack web application for crowdsourcing sidewalk accessibility data in Ithaca, NY. Users can draw paths on an interactive map, label accessibility status, and attach optional photos and notes. Contributions are stored in Firebase Firestore and synchronized in real time using snapshot listeners.
 
-Currently, two official plugins are available:
+### Technical Overview
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **Frontend:** React, Vite
+- **Mapping:** Leaflet, OpenStreetMap tiles
+- **Backend:** Firebase (Firestore + Google OAuth)
+- **UI:** Tailwind CSS, Lucide Icons
 
-## React Compiler
+### Key Features
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+- Interactive sidewalk path drawing on a Leaflet map
+- Real-time Firestore synchronization via `onSnapshot`
+- Google-authenticated submissions with ownership-based deletion
+- Client-side image compression for uploads
+- Category-based filtering with color-coded map rendering

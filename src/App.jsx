@@ -13,10 +13,11 @@ import {
   Loader2,
   Camera,
   Trash2,
-  // removed Zap (snap icon)
 } from 'lucide-react';
+import { db, auth } from './firebase.js'
+import { collection, addDoc, onSnapshot, serverTimestamp, deleteDoc, doc, getDoc } from 'firebase/firestore'
+import { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth'
 
-// --- Constants ---
 const MAP_CENTER = [42.4472, -76.4850];
 const ZOOM_LEVEL = 15;
 
@@ -46,25 +47,45 @@ const CATEGORIES = {
 
 export default function AccessMap() {
   // --- Local State ---
-  const [segments, setSegments] = useState(() => {
-    try {
-      const saved = localStorage.getItem('access-map-data');
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      console.error("Failed to load from localStorage", e);
-      return [];
-    }
-  });
+  const [segments, setSegments] = useState([]);
   const [mapLoaded, setMapLoaded] = useState(false);
 
-  // Persistence Effect
+  // Auth state
+  const [user, setUser] = useState(null)
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => {
+      console.log('Auth state changed:', u ? u.uid : null)
+      setUser(u)
+    })
+    return unsub
+  }, [])
+
+  // Firestore sync: subscribe to `segments` collection and keep local state in sync
   useEffect(() => {
     try {
-      localStorage.setItem('access-map-data', JSON.stringify(segments));
-    } catch (e) {
-      console.error("Failed to save to localStorage", e);
+      const col = collection(db, 'segments')
+      const unsub = onSnapshot(col, (snapshot) => {
+        const items = snapshot.docs.map(d => {
+          const data = d.data()
+          const rawPath = data.path || []
+          const path = rawPath.map(pt => {
+            if (Array.isArray(pt)) return pt
+            if (pt && typeof pt.lat === 'number' && typeof pt.lng === 'number') return [pt.lat, pt.lng]
+            return null
+          }).filter(Boolean)
+
+          const createdAt = data.createdAt && data.createdAt.toDate ? data.createdAt.toDate() : data.createdAt
+          return { ...data, path, createdAt, id: d.id }
+        })
+        setSegments(items)
+      }, (err) => {
+        console.error('Firestore listener error', err)
+      })
+      return () => unsub()
+    } catch (err) {
+      console.error('Failed to subscribe to Firestore', err)
     }
-  }, [segments]);
+  }, [])
 
   // Drawing State
   const [isDrawing, setIsDrawing] = useState(false);
@@ -92,8 +113,6 @@ export default function AccessMap() {
   const fileInputRef = useRef(null);
   const lastPointRef = useRef(null);
 
-  // Note: snap-to-road routing removed — app uses straight-line segments.
-
   // --- Actions ---
 
   // Global bridge for popup clicks
@@ -108,9 +127,56 @@ export default function AccessMap() {
 
   const handleConfirmDelete = () => {
     if (!segmentToDelete) return;
-    setSegments(prev => prev.filter(s => s.id !== segmentToDelete));
-    setSegmentToDelete(null);
+    const seg = segments.find(s => s.id === segmentToDelete)
+    console.log('Attempting delete:', { docId: segmentToDelete, currentUid: user?.uid, ownerUid: seg?.author_uid, seg })
+    if (seg && seg.author_uid && (!user || user.uid !== seg.author_uid)) {
+      alert('You are not the owner of this contribution and cannot delete it.')
+      setSegmentToDelete(null)
+      return
+    }
+
+    // Remove from Firestore (if present) and local state
+    (async () => {
+      try {
+        const ref = doc(db, 'segments', segmentToDelete)
+        const snap = await getDoc(ref)
+        console.log('Pre-delete doc snapshot:', { exists: snap.exists(), data: snap.exists() ? snap.data() : null })
+        if (!snap.exists()) {
+          alert('Contribution not found in cloud - it may have already been deleted.')
+          setSegmentToDelete(null)
+          return
+        }
+        await deleteDoc(ref)
+        console.log('Delete successful for', segmentToDelete)
+        setSegmentToDelete(null);
+      } catch (e) {
+        console.error('Firestore delete failed', e)
+        const code = e.code || 'unknown'
+        const message = e.message || String(e)
+        alert(`Failed to delete contribution (${code}): ${message}`)
+        setSegmentToDelete(null);
+      }
+    })()
   };
+
+  // Authentication helpers
+  const signIn = async () => {
+    try {
+      const provider = new GoogleAuthProvider()
+      await signInWithPopup(auth, provider)
+    } catch (e) {
+      console.error('Sign-in failed', e)
+      alert('Sign-in failed. Check console for details.')
+    }
+  }
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth)
+    } catch (e) {
+      console.error('Sign-out failed', e)
+    }
+  }
 
   // --- Leaflet Initialization ---
   useEffect(() => {
@@ -253,8 +319,7 @@ export default function AccessMap() {
               </div>
             ` : ''}
             
-            <div class="flex justify-between items-center pt-3 border-t border-slate-100 mt-2">
-              <span class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Local Session</span>
+            <div class="flex justify-end items-center pt-3 border-t border-slate-100 mt-2">
               <button 
                 onclick="window.accessMapDeleteSegment('${seg.id}')"
                 class="group flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-red-600 hover:bg-red-50 px-2 py-1.5 rounded-md transition-all cursor-pointer"
@@ -335,17 +400,35 @@ export default function AccessMap() {
     reader.readAsDataURL(file);
   };
 
-  const submitSegment = () => {
+  const submitSegment = async () => {
+    if (!user) {
+      alert('Please sign in to save contributions.')
+      return
+    }
     const newSegment = {
       id: Date.now().toString(),
       path: [...currentPath], // Create a copy
       category: selectedCategory,
       note: note,
       image: selectedImage,
-      createdAt: new Date()
+      createdAt: new Date(),
+      author_uid: user.uid
     };
 
     setSegments(prev => [...prev, newSegment]);
+
+    // Write to Firestore (uses server timestamp for consistent ordering)
+    try {
+      const firestorePayload = {
+        ...newSegment,
+        path: newSegment.path.map(p => ({ lat: p[0], lng: p[1] })),
+        createdAt: serverTimestamp(),
+      }
+      await addDoc(collection(db, 'segments'), firestorePayload)
+    } catch (err) {
+      console.error('Failed to write segment to Firestore', err)
+      alert('Failed to save contribution to cloud. It is saved locally in this browser session. Check the console for details.')
+    }
 
     setShowSubmissionForm(false);
     setCurrentPath([]);
@@ -387,6 +470,15 @@ export default function AccessMap() {
               Add Path
             </button>
           )}
+          {/* Auth buttons */}
+          {user ? (
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-slate-700 hidden sm:inline">{user.displayName || user.email}</span>
+              <button onClick={handleSignOut} className="px-3 py-2 rounded-full text-sm bg-slate-100 hover:bg-slate-200">Sign out</button>
+            </div>
+          ) : (
+            <button onClick={signIn} className="px-3 py-2 rounded-full text-sm bg-white border border-slate-200 hover:bg-slate-50">Sign in</button>
+          )}
           {isDrawing && (
             <div className="flex items-center gap-2 animate-in fade-in slide-in-from-right-4">
 
@@ -415,7 +507,6 @@ export default function AccessMap() {
 
       {/* Main Map Container */}
       <div className="flex-1 relative isolate bg-slate-200">
-        {/* snap-to-road removed: no routing overlay */}
 
         {!mapLoaded && (
           <div className="absolute inset-0 flex items-center justify-center z-10 bg-slate-50">
